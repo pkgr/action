@@ -1,6 +1,6 @@
 # pkgr/action
 
-GitHub Action for packaging apps as DEB or RPM
+GitHub Action for packaging apps as DEB or RPM. Should be used as a replacement for [Packager.io](https://packager.io) hosted service.
 
 ## Usage
 
