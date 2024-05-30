@@ -24,6 +24,10 @@ inputs:
     description: 'Prefix for the cache'
     required: true
     default: 'v1'
+  env:
+    description: 'Environment variables to pass to pkgr'
+    required: false
+    default: ''
 
 outputs:
   workspace:
@@ -76,17 +80,14 @@ runs:
       run: |
         workspace=${{ steps.setup.outputs.workspace }}
 
-        env | grep DATABASE_URL
-
         cd ${{ inputs.path }}
         docker run --rm \
           -v .:/pkgr/app \
           -v $workspace/cache:/pkgr/cache \
           -v $workspace/output:/pkgr/output \
           --net=host \
-          -e DATABASE_URL -e REDIS_URL \
           ghcr.io/crohr/pkgr/${{ inputs.target }}-${{ inputs.pkgr_version }} \
-          --name "${{ inputs.name }}" --version "${{ inputs.version }}" --iteration "${{ steps.setup.outputs.iteration }}"
+          --name "${{ inputs.name }}" --version "${{ inputs.version }}" --iteration "${{ steps.setup.outputs.iteration }}" --env "${{ inputs.env }}"
 
         package_path=""
         if [ -f $workspace/output/*.deb ]; then
