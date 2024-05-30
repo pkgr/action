@@ -42,3 +42,5 @@ jobs:
           name: ${{ steps.package.outputs.package_name }}
           path: ${{ steps.package.outputs.package_path }}
 ```
+
+<img width="1684" alt="Building packages across linux distributions" src="https://github.com/pkgr/action/assets/6114/72388c40-6e97-4481-899a-9a67b081e6fa">
