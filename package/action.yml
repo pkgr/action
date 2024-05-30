@@ -76,6 +76,8 @@ runs:
       run: |
         workspace=${{ steps.setup.outputs.workspace }}
 
+        env | grep DATABASE_URL
+
         cd ${{ inputs.path }}
         docker run --rm \
           -v .:/pkgr/app \
