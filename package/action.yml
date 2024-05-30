@@ -68,6 +68,7 @@ runs:
       with:
         path: ${{ steps.setup.outputs.workspace }}/cache
         key: pkgr-${{ inputs.cache_prefix }}-${{ inputs.target }}-${{ inputs.pkgr_version }}
+        save-always: true
 
     - name: Package
       shell: bash
