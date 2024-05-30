@@ -1,19 +1,12 @@
-# pkgr/action
-
-GitHub Action for packaging apps as DEB or RPM
-
-## Usage
-
-```yaml
-name: Package
+name: Test
 on: [push]
 
 jobs:
-  build:
+  test:
+    timeout-minutes: 10
     name: ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         target:
           - debian:10
@@ -27,18 +20,25 @@ jobs:
           - el:9
           - sles:12
           - sles:15
+
     steps:
       - uses: actions/checkout@v4
-
-      - uses: pkgr/actions@v1
+        with:
+          path: action
+      - uses: actions/checkout@v4
+        with:
+          repository: crohr/blank-sinatra-app
+          ref: master
+          path: app
+      - uses: ./action/package
         id: package
         with:
+          name: blank-sinatra-app
           target: ${{ matrix.target }}
           version: '1.0.0'
-
+          path: app
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.package_name }}
           path: ${{ steps.package.outputs.package_path }}
-```

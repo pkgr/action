@@ -1,0 +1,95 @@
+name: 'pkgr/action/package'
+description: 'Package your application as DEB or RPM'
+inputs:
+  target:
+    description: 'Distribution to target'
+    required: true
+  name:
+    description: 'Name of the package'
+    required: true
+    default: ${{ github.repository }}
+  path:
+    description: 'Path to the application'
+    required: true
+    default: '${{ github.workspace }}'
+  version:
+    description: 'Version of the package'
+    required: true
+    default: '0.0.0'
+  pkgr_version:
+    description: 'Version of pkgr'
+    required: true
+    default: 'master'
+  cache_prefix:
+    description: 'Prefix for the cache'
+    required: true
+    default: 'v1'
+
+outputs:
+  workspace:
+    description: "Workspace directory"
+    value: ${{ steps.setup.outputs.workspace }}
+  package_path:
+    description: "Package file path"
+    value: ${{ steps.package.outputs.package_path }}
+  package_type:
+    description: "Package type"
+    value: ${{ steps.package.outputs.package_type }}
+  package_name:
+    description: "Package name"
+    value: ${{ steps.package.outputs.package_name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup
+      shell: bash
+      id: setup
+      run: |
+        workspace=/tmp/pkgr
+        rm -rf $workspace
+        mkdir -p $workspace/cache $workspace/output
+        echo "workspace=$workspace" >> $GITHUB_OUTPUT
+
+        # cd to the app path, so that git works
+        cd ${{ inputs.path }}
+        # e.g. ubuntu:20.04 becomes ubuntu20
+        codename=${{ inputs.target }}
+        codename=${codename/:/}
+        codename=${codename%%.*}
+        iteration="$(date +%s)"
+        if [ -n "$(git rev-parse HEAD)" ]; then
+          iteration="$iteration.$(git rev-parse HEAD | cut -c1-7)"
+        fi
+        iteration="$iteration.$codename"
+        echo "iteration=$iteration" >> $GITHUB_OUTPUT
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.setup.outputs.workspace }}/cache
+        key: pkgr-${{ inputs.cache_prefix }}-${{ inputs.target }}-${{ inputs.pkgr_version }}
+
+    - name: Package
+      shell: bash
+      id: package
+      run: |
+        workspace=${{ steps.setup.outputs.workspace }}
+
+        cd ${{ inputs.path }}
+        docker run --rm \
+          -v .:/pkgr/app \
+          -v $workspace/cache:/pkgr/cache \
+          -v $workspace/output:/pkgr/output \
+          ghcr.io/crohr/pkgr/${{ inputs.target }}-${{ inputs.pkgr_version }} \
+          --name "${{ inputs.name }}" --version "${{ inputs.version }}" --iteration "${{ steps.setup.outputs.iteration }}"
+
+        package_path=""
+        if [ -f $workspace/output/*.deb ]; then
+          package_path=$(ls $workspace/output/*.deb)
+        elif [ -f $workspace/output/*.rpm ]; then
+          package_path=$(ls $workspace/output/*.rpm)
+        fi
+        echo "package_path=$package_path" >> $GITHUB_OUTPUT
+        echo "package_type=${package_path##*.}" >> $GITHUB_OUTPUT
+        echo "package_name=${package_path##*/}" >> $GITHUB_OUTPUT
+
