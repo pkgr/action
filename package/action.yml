@@ -24,6 +24,14 @@ inputs:
     description: 'Prefix for the cache'
     required: true
     default: 'v1'
+  env:
+    description: 'Environment variables to pass to pkgr'
+    required: false
+    default: ''
+  debug:
+    description: 'Debug mode'
+    required: false
+    default: 'false'
 
 outputs:
   workspace:
@@ -68,6 +76,7 @@ runs:
       with:
         path: ${{ steps.setup.outputs.workspace }}/cache
         key: pkgr-${{ inputs.cache_prefix }}-${{ inputs.target }}-${{ inputs.pkgr_version }}
+        save-always: true
 
     - name: Package
       shell: bash
@@ -80,8 +89,9 @@ runs:
           -v .:/pkgr/app \
           -v $workspace/cache:/pkgr/cache \
           -v $workspace/output:/pkgr/output \
+          --net=host \
           ghcr.io/crohr/pkgr/${{ inputs.target }}-${{ inputs.pkgr_version }} \
-          --name "${{ inputs.name }}" --version "${{ inputs.version }}" --iteration "${{ steps.setup.outputs.iteration }}"
+          --name "${{ inputs.name }}" --version "${{ inputs.version }}" --iteration "${{ steps.setup.outputs.iteration }}" --env "${{ inputs.env }}" --debug=${{ inputs.debug }}
 
         package_path=""
         if [ -f $workspace/output/*.deb ]; then

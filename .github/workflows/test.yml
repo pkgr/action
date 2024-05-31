@@ -37,6 +37,7 @@ jobs:
           name: blank-sinatra-app
           version: '1.0.0'
           path: app
+          debug: true
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
