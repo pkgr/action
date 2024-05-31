@@ -71,12 +71,12 @@ runs:
         fi
         iteration="$iteration.$codename"
         echo "iteration=$iteration" >> $GITHUB_OUTPUT
-    - name: Cache
-      uses: actions/cache@v4
+
+    - name: Restore cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ steps.setup.outputs.workspace }}/cache
         key: pkgr-${{ inputs.cache_prefix }}-${{ inputs.target }}-${{ inputs.pkgr_version }}
-        save-always: true
 
     - name: Package
       shell: bash
@@ -103,3 +103,8 @@ runs:
         echo "package_type=${package_path##*.}" >> $GITHUB_OUTPUT
         echo "package_name=${package_path##*/}" >> $GITHUB_OUTPUT
 
+    - name: Save cache
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.setup.outputs.workspace }}/cache
+        key: pkgr-${{ inputs.cache_prefix }}-${{ inputs.target }}-${{ inputs.pkgr_version }}
