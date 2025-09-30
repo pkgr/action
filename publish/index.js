@@ -47,7 +47,8 @@ async function run() {
     form.append('repo', repo);
     form.append('target', target);
     form.append('channel', channel);
-    form.append('package', fs.createReadStream(file));
+    // Make sure the file field is last
+    form.append('file', fs.createReadStream(file), { filename: fileName });
 
     // Upload
     const uploadUrl = `${serverUrl}/api/upload`;
