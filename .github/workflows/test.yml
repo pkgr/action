@@ -3,33 +3,28 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  REPOSITORY: crohr/blank-noop-app
 jobs:
   test:
-    timeout-minutes: 45
+    timeout-minutes: 30
     name: ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target:
-          - debian:10
-          - debian:11
-          - debian:12
-          - ubuntu:20.04
-          - ubuntu:22.04
+          - debian:13
           - ubuntu:24.04
-          - el:7
-          - el:8
           - el:9
-          - sles:12
           - sles:15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: action
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          repository: crohr/blank-sinatra-app
+          repository: ${{ env.REPOSITORY }}
           ref: master
           path: app
       - uses: ./action/package
@@ -49,7 +44,7 @@ jobs:
         uses: ./action/publish
         with:
           target: ${{ matrix.target }}
-          token: ${{ secrets.PUBLISH_TOKEN }}
-          repository: crohr/blank-sinatra-app
-          channel: master
-          artefact: ${{ steps.package.outputs.package_path }}
+          token: ${{ secrets.PACKAGER_PUBLISH_TOKEN }}
+          repository: ${{ env.REPOSITORY }}
+          channel: ${{ github.ref_name }}
+          file: ${{ steps.package.outputs.package_path }}
