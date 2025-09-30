@@ -41,7 +41,7 @@ jobs:
           repository: ${{ github.repository }}
           channel: stable
           token: ${{ secrets.PACKAGEHALL_TOKEN }}
-          url: https://packagehall.io
+          url: https://go.packager.io
 ```
 
 ### Multi-Distribution Publishing
@@ -77,7 +77,6 @@ jobs:
 - name: Use package UUID
   run: |
     echo "Package UUID: ${{ steps.publish.outputs.uuid }}"
-    echo "Download URL: https://packagehall.io/api/download/${{ steps.publish.outputs.uuid }}"
 ```
 
 ## Inputs
@@ -89,7 +88,7 @@ jobs:
 | `repository` | ✅ | `${{ github.repository }}` | Repository in `org/repo` format |
 | `channel` | ✅ | `master` | Channel name (e.g., `stable`, `testing`, `main`) |
 | `token` | ✅ | - | PackageHall authentication token |
-| `url` | ❌ | `https://packagehall.io` | PackageHall server URL |
+| `url` | ❌ | `https://go.packager.io` | PackageHall server URL |
 
 ## Outputs
 
@@ -151,7 +150,7 @@ export INPUT_TARGET=ubuntu/24.04
 export INPUT_REPOSITORY=myorg/myrepo
 export INPUT_CHANNEL=stable
 export INPUT_TOKEN=your-token
-export INPUT_URL=https://packagehall.io
+export INPUT_URL=https://go.packager.io
 
 # Run the action
 node index.js

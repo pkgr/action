@@ -21,7 +21,7 @@ inputs:
   url:
     description: 'PackageHall server URL'
     required: false
-    default: 'https://packagehall.io'
+    default: 'https://go.packager.io'
 
 outputs:
   uuid:
