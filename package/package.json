@@ -1,0 +1,17 @@
+{
+  "name": "pkgr-action-package",
+  "version": "1.0.0",
+  "description": "Package applications as DEB or RPM",
+  "main": "index.js",
+  "scripts": {
+    "build": "ncc build index.js -o dist --license licenses.txt"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/exec": "^1.1.1",
+    "@actions/cache": "^3.2.4"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3"
+  }
+}
