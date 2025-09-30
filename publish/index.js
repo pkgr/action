@@ -43,11 +43,11 @@ async function run() {
 
     // Create form data
     const form = new FormData();
-    form.append('package', fs.createReadStream(file));
     form.append('org', org);
     form.append('repo', repo);
     form.append('target', target);
     form.append('channel', channel);
+    form.append('package', fs.createReadStream(file));
 
     // Upload
     const uploadUrl = `${serverUrl}/api/upload`;
