@@ -30152,7 +30152,9 @@ async function run() {
   try {
     // Get inputs
     const file = core.getInput('file', { required: true });
-    const target = core.getInput('target', { required: true });
+    let target = core.getInput('target', { required: true });
+    // Transform target: replace : with / (e.g., debian:10 -> debian/10)
+    target = target.replace(':', '/');
     const repository = core.getInput('repository', { required: true });
     const channel = core.getInput('channel', { required: true });
     const token = core.getInput('token', { required: true });
