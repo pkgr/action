@@ -1,50 +1,32 @@
 name: 'pkgr/action/publish'
 description: 'Publish your package to the packagehall'
 inputs:
-  artefact:
-    description: 'Artefact to publish'
+  file:
+    description: 'File to publish'
     required: true
   target:
-    description: 'Distribution'
+    description: 'Distribution (e.g. debian/13, ubuntu/24.04, el/9)'
     required: true
   repository:
-    description: 'Repository to publish to'
+    description: 'Repository to publish to (e.g. org/repo)'
     required: true
     default: '${{ github.repository }}'
   channel:
-    description: 'Channel to publish to'
+    description: 'Channel to publish to (e.g. master, stable)'
     required: true
     default: 'master'
   token:
     description: 'Token to use for authentication'
     required: true
-  force:
-    description: 'Publish even if the artefact already exists, and auto-create the channel if it does not exist'
+  url:
+    description: 'PackageHall server URL'
     required: false
-    default: "true"
+    default: 'https://packagehall.io'
 
 outputs:
-  id:
-    description: "Package identifier"
-    value: ${{ steps.upload.outputs.id }}
+  uuid:
+    description: "Package UUID"
 
 runs:
-  using: "composite"
-  steps:
-    - name: Upload
-      id: upload
-      shell: bash
-      env:
-        REPO_FULL_NAME: ${{ inputs.repository }}
-        TARGET: ${{ inputs.target }}
-        CHANNEL: ${{ inputs.channel }}
-      run: |
-        org="${REPO_FULL_NAME%%/*}"
-        repo="${REPO_FULL_NAME##*/}"
-        url="https://dl.packager.io/api/orgs/${org}/repos/${repo}/packages"
-        echo "Pushing to ${url}..."
-        curl --fail-with-body -u "${{ inputs.token }}" -i -X POST "${url}" \
-          -F "artefact=@${{ inputs.artefact }}" \
-          -F "targets[]=${TARGET/://}" \
-          -F "channels[]=$CHANNEL" \
-          -F "force=${{ inputs.force }}"
+  using: 'node24'
+  main: 'dist/index.js'

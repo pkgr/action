@@ -1,0 +1,16 @@
+{
+  "name": "pkgr-action-publish",
+  "version": "1.0.0",
+  "description": "Publish packages to PackageHall",
+  "main": "index.js",
+  "scripts": {
+    "build": "ncc build index.js -o dist --license licenses.txt"
+  },
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "form-data": "^4.0.1"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3"
+  }
+}
