@@ -52,7 +52,7 @@ async function run() {
     }
 
     // Add codename to iteration
-    let codename = target.replace(':', '').replace(/\..*/g, '');
+    let codename = target.replace('/', '').replace(/\..*/g, '');
     iteration = `${iteration}.${codename}`;
 
     core.info(`Iteration: ${iteration}`);
@@ -69,7 +69,8 @@ async function run() {
     // Package
     core.info(`Packaging ${name} version ${version} for ${target}`);
 
-    const dockerImage = `ghcr.io/pkgr/pkgr/${target}-${pkgrVersion}`;
+    const dockerTag = [target.replace('/', ':'), pkgrVersion].join('-');
+    const dockerImage = `ghcr.io/pkgr/pkgr/${dockerTag}`;
     const dockerArgs = [
       'run',
       '--rm',
