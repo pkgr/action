@@ -31,7 +31,7 @@ jobs:
         id: package
         with:
           target: ${{ matrix.target }}
-          name: blank-sinatra-app
+          name: blank-noop-app
           version: '1.0.0'
           path: app
           debug: true
