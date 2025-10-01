@@ -3,6 +3,31 @@ const fs = require('fs');
 const path = require('path');
 const FormData = require('form-data');
 
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function uploadWithRetry(uploadFn, maxRetries = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await uploadFn();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < maxRetries) {
+        const backoffMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s
+        core.warning(`Upload attempt ${attempt} failed: ${error.message}`);
+        core.info(`Retrying in ${backoffMs / 1000}s... (${maxRetries - attempt} retries remaining)`);
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function run() {
   try {
     // Get inputs
@@ -43,49 +68,51 @@ async function run() {
     core.info(`Target: ${target}`);
     core.info(`Channel: ${channel}`);
 
-    // Create form data
-    const form = new FormData();
-    form.append('org', org);
-    form.append('repo', repo);
-    form.append('target', target);
-    form.append('channel', channel);
-    // Make sure the file field is last
-    form.append('file', fs.createReadStream(file), { filename: fileName });
-
-    // Upload
+    // Upload with retry logic
     const uploadUrl = `${serverUrl}/api/upload`;
     const url = new URL(uploadUrl);
 
-    const response = await new Promise((resolve, reject) => {
-      // Set timeout (10 minutes)
-      const timeout = setTimeout(() => {
-        reject(new Error('Upload timeout after 10 minutes'));
-      }, 10 * 60 * 1000);
+    const response = await uploadWithRetry(async () => {
+      // Create form data (must be recreated for each retry)
+      const form = new FormData();
+      form.append('org', org);
+      form.append('repo', repo);
+      form.append('target', target);
+      form.append('channel', channel);
+      // Make sure the file field is last
+      form.append('file', fs.createReadStream(file), { filename: fileName });
 
-      form.submit({
-        host: url.hostname,
-        port: url.port || (url.protocol === 'https:' ? 443 : 80),
-        path: url.pathname,
-        protocol: url.protocol,
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      }, (err, res) => {
-        clearTimeout(timeout);
+      return await new Promise((resolve, reject) => {
+        // Set timeout (10 minutes)
+        const timeout = setTimeout(() => {
+          reject(new Error('Upload timeout after 10 minutes'));
+        }, 10 * 60 * 1000);
 
-        if (err) return reject(err);
+        form.submit({
+          host: url.hostname,
+          port: url.port || (url.protocol === 'https:' ? 443 : 80),
+          path: url.pathname,
+          protocol: url.protocol,
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        }, (err, res) => {
+          clearTimeout(timeout);
 
-        let data = '';
+          if (err) return reject(err);
 
-        res.on('data', (chunk) => {
-          data += chunk;
+          let data = '';
+
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+
+          res.on('end', () => {
+            resolve({ statusCode: res.statusCode, body: data, headers: res.headers });
+          });
+
+          res.on('error', reject);
         });
-
-        res.on('end', () => {
-          resolve({ statusCode: res.statusCode, body: data, headers: res.headers });
-        });
-
-        res.on('error', reject);
       });
     });
 
