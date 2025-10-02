@@ -83157,13 +83157,17 @@ async function run() {
     core.info(`Iteration: ${iteration}`);
 
     // Restore cache
-    const cacheKey = `pkgr-${cachePrefix}-${target}-${pkgrVersion}-${process.env.GITHUB_SHA}`;
-    const restoreKeys = [
-      `pkgr-${cachePrefix}-${target}-${pkgrVersion}-`
-    ];
+    const cacheRestorePrefix = `pkgr-${cachePrefix}-${codename}-${pkgrVersion}-`
+    const cacheKey = `${cacheRestorePrefix}${process.env.GITHUB_SHA}`;
+    const restoreKeys = [cacheRestorePrefix];
 
     core.info(`Restoring cache with key: ${cacheKey}`);
-    await cache.restoreCache([`${workspace}/cache`], cacheKey, restoreKeys);
+    const cacheHit = await cache.restoreCache([`${workspace}/cache`], cacheKey, restoreKeys);
+    if (cacheHit) {
+      core.info(`Cache hit: ${cacheHit}`);
+    } else {
+      core.info(`Cache miss`);
+    }
 
     // Package
     core.info(`Packaging ${name} version ${version} for ${target}`);
@@ -83215,7 +83219,12 @@ async function run() {
 
     // Save cache
     core.info(`Saving cache with key: ${cacheKey}`);
-    await cache.saveCache([`${workspace}/cache`], cacheKey);
+    const cacheId = await cache.saveCache([`${workspace}/cache`], cacheKey);
+    if (cacheId) {
+      core.info(`Cache saved: ${cacheId}`);
+    } else {
+      core.info(`Cache save failed`);
+    }
 
   } catch (error) {
     core.setFailed(error.message);
