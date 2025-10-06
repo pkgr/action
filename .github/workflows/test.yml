@@ -13,6 +13,7 @@ jobs:
     strategy:
       matrix:
         target:
+          - debian:10
           - debian:13
           - ubuntu:24.04
           - el:9
