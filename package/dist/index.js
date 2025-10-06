@@ -83217,6 +83217,14 @@ async function run() {
     core.setOutput('package_type', packageType);
     core.setOutput('package_name', packageName);
 
+    // Fix cache permissions before saving
+    core.info('Fixing cache permissions');
+    try {
+      await exec.exec('sudo', ['chown', '-R', `${process.env.USER}:${process.env.USER}`, `${workspace}/cache`]);
+    } catch (error) {
+      core.warning(`Failed to fix permissions: ${error.message}`);
+    }
+
     // Save cache
     core.info(`Saving cache with key: ${cacheKey}`);
     const cacheId = await cache.saveCache([`${workspace}/cache`], cacheKey);
