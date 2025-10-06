@@ -13,7 +13,6 @@ jobs:
     strategy:
       matrix:
         target:
-          - debian:10
           - debian:13
           - ubuntu:24.04
           - el:9
@@ -28,6 +27,7 @@ jobs:
           repository: ${{ env.REPOSITORY }}
           ref: master
           path: app
+      - run: rm app/.pkgr.yml
       - uses: ./action/package
         id: package
         with:
