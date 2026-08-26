@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  PKGR_VERSION: 7a9a69d8736b90ff1af918dd1e4b84a5372df5a9
+  PKGR_VERSION: c87a5d00a3a7c4c0887161c8000cc7df8734ebed
 
 jobs:
   recipes:
@@ -71,6 +71,7 @@ jobs:
       - name: Select legacy runtime versions
         if: matrix.target == 'el:8' || matrix.target == 'sles:12'
         run: |
+          sed -i 's/ruby "3.3.10"/ruby "2.7.7"/' package/e2e/fixtures/ruby/Gemfile
           sed -i 's/ruby 3.3.10p0/ruby 2.7.7p0/; s/   2.7.2/   2.4.22/' package/e2e/fixtures/ruby/Gemfile.lock
           if [ '${{ matrix.target }}' = 'sles:12' ]; then
             sed -i 's/24.13.0/16.18.1/' package/e2e/fixtures/node/package.json

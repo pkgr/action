@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  PKGR_VERSION: 7a9a69d8736b90ff1af918dd1e4b84a5372df5a9
+  PKGR_VERSION: c87a5d00a3a7c4c0887161c8000cc7df8734ebed
 
 jobs:
   unit:
