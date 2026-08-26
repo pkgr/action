@@ -4,7 +4,8 @@
   "description": "Package applications as DEB or RPM",
   "main": "index.js",
   "scripts": {
-    "build": "ncc build index.js -o dist --license licenses.txt"
+    "build": "ncc build index.js -o dist --license licenses.txt && ncc build cleanup.js -o dist/cleanup --license licenses.txt && perl -pi -e 's/\\r$//; s/[ \\t]+$//' dist/index.js dist/cleanup/index.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@actions/core": "^1.11.1",

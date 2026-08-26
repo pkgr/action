@@ -1,6 +1,638 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ 84580:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const crypto = __nccwpck_require__(76982);
+const fs = __nccwpck_require__(79896);
+const http = __nccwpck_require__(58611);
+const path = __nccwpck_require__(16928);
+const { spawn } = __nccwpck_require__(35317);
+
+const ALLOWED_RECIPES = new Set([
+  'ruby',
+  'rubygem-bundler',
+  'rubygem-pkgr',
+  'node',
+  'python',
+  'pkgr',
+  'libyaml',
+  'libffi',
+  'sqlite'
+]);
+
+const VERSION_PATTERN = /^[a-zA-Z0-9][+._a-zA-Z0-9-]*$/;
+const TARGET_PATTERN = /^[a-z0-9][._a-z0-9-]*:[a-zA-Z0-9][._a-zA-Z0-9-]*$/;
+const PREFIX_PATTERN = /^\/[+._/a-zA-Z0-9-]+$/;
+const RECIPE_RESERVATIONS = new Map([
+  ['node', 1],
+  ['libyaml', 1],
+  ['libffi', 1],
+  ['sqlite', 1],
+  ['ruby', 2],
+  ['python', 2],
+  ['rubygem-bundler', 3],
+  ['rubygem-pkgr', 3],
+  ['pkgr', 4]
+]);
+
+class WeightedSemaphore {
+  constructor(limit) {
+    this.limit = limit;
+    this.active = 0;
+    this.waiters = [];
+  }
+
+  async acquire(weight) {
+    if (weight === 0) return;
+    if (this.active + weight <= this.limit && this.waiters.length === 0) {
+      this.active += weight;
+      return;
+    }
+    await new Promise((resolve) => this.waiters.push({ resolve, weight }));
+  }
+
+  release(weight) {
+    if (weight === 0) return;
+    this.active -= weight;
+    while (this.waiters.length > 0) {
+      const next = this.waiters[0];
+      if (this.active + next.weight > this.limit) return;
+      this.waiters.shift();
+      this.active += next.weight;
+      next.resolve();
+    }
+  }
+}
+
+function artifactIdentity({ cachePrefix, target, architecture, imageId, recipe, version, prefix }) {
+  return JSON.stringify({
+    schema: 1,
+    cachePrefix,
+    target,
+    architecture,
+    imageId,
+    recipe,
+    version,
+    prefix
+  });
+}
+
+function artifactDigest(request) {
+  return crypto.createHash('sha256').update(artifactIdentity(request)).digest('hex');
+}
+
+function cacheKey(request) {
+  const target = request.target.replace(/[^a-zA-Z0-9._-]/g, '-');
+  return `pkgr-toolchain-${request.cachePrefix}-${target}-${request.recipe}-${artifactDigest(request)}`;
+}
+
+function validateRequest(requestUrl, expectedTarget) {
+  const recipe = requestUrl.searchParams.get('recipe') || '';
+  const version = requestUrl.searchParams.get('version') || '';
+  const target = requestUrl.searchParams.get('target') || '';
+  const prefix = requestUrl.searchParams.get('prefix') || '/usr/local';
+
+  if (!ALLOWED_RECIPES.has(recipe)) throw new RequestError(404, `Unknown recipe: ${recipe || '(empty)'}`);
+  if (!VERSION_PATTERN.test(version)) throw new RequestError(400, 'Invalid version');
+  if (!TARGET_PATTERN.test(target)) throw new RequestError(400, 'Invalid target');
+  if (target !== expectedTarget) throw new RequestError(400, `Target mismatch: expected ${expectedTarget}`);
+  if (prefix === '/' || prefix.split('/').includes('..') || !PREFIX_PATTERN.test(prefix)) {
+    throw new RequestError(400, 'Invalid prefix');
+  }
+
+  return { recipe, version, target, prefix };
+}
+
+class RequestError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+function commandSucceeded(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: 'ignore' });
+    child.once('error', () => resolve(false));
+    child.once('close', (code) => resolve(code === 0));
+  });
+}
+
+async function validateArchive(archivePath) {
+  if (!fs.existsSync(archivePath)) return false;
+  if (!(await commandSucceeded('tar', ['-tzf', archivePath]))) return false;
+  return commandSucceeded('tar', ['-tzf', archivePath, './compile.log']);
+}
+
+class BuildcurlServer {
+  constructor(options) {
+    this.image = options.image;
+    this.imageId = options.imageId;
+    this.architecture = options.architecture;
+    this.target = options.target;
+    this.cachePrefix = options.cachePrefix;
+    this.cacheRoot = options.cacheRoot;
+    this.cache = options.cache || null;
+    this.core = options.core || { info() {}, warning() {}, error() {} };
+    this.spawn = options.spawn || spawn;
+    this.buildArtifactOverride = options.buildArtifact || null;
+    this.validateArchive = options.validateArchive || validateArchive;
+    this.timeoutMs = options.timeoutMs || 45 * 60 * 1000;
+    this.sessionId = options.sessionId || crypto.randomBytes(10).toString('hex');
+    this.nestedToken = options.nestedToken || crypto.randomBytes(20).toString('hex');
+    this.server = null;
+    this.url = null;
+    this.inFlight = new Map();
+    this.pendingSaves = new Map();
+    this.activeContainers = new Set();
+    const maxConcurrentBuilds = options.maxConcurrentBuilds || 8;
+    this.admissionSemaphore = new WeightedSemaphore(maxConcurrentBuilds);
+    this.containerSemaphore = new WeightedSemaphore(maxConcurrentBuilds);
+  }
+
+  async start() {
+    await fs.promises.mkdir(this.cacheRoot, { recursive: true });
+    this.server = http.createServer((request, response) => {
+      this.handle(request, response).catch((error) => {
+        this.core.error(error.stack || error.message);
+        const statusCode = error instanceof RequestError ? error.statusCode : 502;
+        if (!response.headersSent) response.writeHead(statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
+        const prefix = error instanceof RequestError ? '' : 'Toolchain build failed: ';
+        response.end(`${prefix}${error.message}\n`);
+      });
+    });
+
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(0, '127.0.0.1', resolve);
+    });
+
+    const address = this.server.address();
+    this.url = `http://127.0.0.1:${address.port}/`;
+    this.core.info(`Local buildcurl server listening at ${this.url}`);
+    return this.url;
+  }
+
+  async handle(request, response) {
+    if (request.method !== 'GET') throw new RequestError(405, 'Only GET is supported');
+
+    let recipeRequest;
+    try {
+      recipeRequest = validateRequest(new URL(request.url, this.url), this.target);
+      recipeRequest.nested = request.headers['x-pkgr-nested-token'] === this.nestedToken;
+    } catch (error) {
+      if (!(error instanceof RequestError)) throw error;
+      response.writeHead(error.statusCode, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end(`${error.message}\n`);
+      return;
+    }
+
+    const result = await this.getArtifact(recipeRequest);
+    const stat = await fs.promises.stat(result.archivePath);
+    response.writeHead(200, {
+      'Content-Type': 'application/gzip',
+      'Content-Length': stat.size,
+      'X-Pkgr-Cache': result.cacheStatus
+    });
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(result.archivePath);
+      stream.once('error', reject);
+      response.once('error', reject);
+      response.once('finish', resolve);
+      stream.pipe(response);
+    });
+  }
+
+  requestWithCacheFields(recipeRequest) {
+    return {
+      ...recipeRequest,
+      cachePrefix: this.cachePrefix,
+      architecture: this.architecture,
+      imageId: this.imageId
+    };
+  }
+
+  async getArtifact(recipeRequest) {
+    const fullRequest = this.requestWithCacheFields(recipeRequest);
+    const digest = artifactDigest(fullRequest);
+
+    if (this.inFlight.has(digest)) {
+      const result = await this.inFlight.get(digest);
+      return { archivePath: result.archivePath, cacheStatus: 'hit' };
+    }
+
+    const promise = this.restoreOrBuild(fullRequest, digest);
+    this.inFlight.set(digest, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlight.delete(digest);
+    }
+  }
+
+  async restoreOrBuild(fullRequest, digest) {
+    const artifactDir = path.join(this.cacheRoot, digest);
+    const archivePath = path.join(artifactDir, 'artifact.tgz');
+    const key = cacheKey(fullRequest);
+    await fs.promises.mkdir(artifactDir, { recursive: true });
+
+    if (await this.validateArchive(archivePath)) {
+      this.core.info(`Toolchain cache hit: ${fullRequest.recipe} ${fullRequest.version}`);
+      return { archivePath, cacheStatus: 'hit' };
+    }
+
+    let saveKey = key;
+    if (this.cache) {
+      try {
+        const restoredKey = await this.cache.restoreCache([artifactDir], key);
+        if (restoredKey && await this.validateArchive(archivePath)) {
+          this.core.info(`Toolchain cache restored: ${fullRequest.recipe} ${fullRequest.version}`);
+          return { archivePath, cacheStatus: 'hit' };
+        }
+        if (restoredKey) {
+          this.core.warning(`Ignoring corrupt toolchain cache: ${restoredKey}`);
+          await fs.promises.rm(artifactDir, { recursive: true, force: true });
+          await fs.promises.mkdir(artifactDir, { recursive: true });
+        }
+
+        const recoveryPrefix = `${key}-recovery-`;
+        const recoveredKey = await this.cache.restoreCache(
+          [artifactDir],
+          `${key}-recovery`,
+          [recoveryPrefix]
+        );
+        if (recoveredKey && await this.validateArchive(archivePath)) {
+          this.core.info(`Toolchain cache restored: ${fullRequest.recipe} ${fullRequest.version}`);
+          return { archivePath, cacheStatus: 'hit' };
+        }
+        if (recoveredKey) {
+          this.core.warning(`Ignoring corrupt toolchain cache: ${recoveredKey}`);
+          await fs.promises.rm(artifactDir, { recursive: true, force: true });
+          await fs.promises.mkdir(artifactDir, { recursive: true });
+        }
+        if (restoredKey) {
+          const runId = process.env.GITHUB_RUN_ID || this.sessionId;
+          const attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+          saveKey = `${recoveryPrefix}${runId}-${attempt}`;
+        }
+      } catch (error) {
+        this.core.warning(`Unable to restore ${fullRequest.recipe} ${fullRequest.version}: ${error.message}`);
+      }
+    }
+
+    await fs.promises.rm(archivePath, { force: true });
+    this.core.info(`Toolchain cache miss: ${fullRequest.recipe} ${fullRequest.version}`);
+    await this.buildArtifact(fullRequest, archivePath);
+    if (!(await this.validateArchive(archivePath))) {
+      await fs.promises.rm(archivePath, { force: true });
+      throw new Error(`Recipe ${fullRequest.recipe} produced an invalid archive`);
+    }
+
+    this.pendingSaves.set(saveKey, artifactDir);
+    return { archivePath, cacheStatus: 'miss' };
+  }
+
+  async buildArtifact(request, archivePath) {
+    if (this.buildArtifactOverride) {
+      await this.buildArtifactOverride(request, archivePath);
+      return;
+    }
+
+    const reservation = request.nested ? 0 : RECIPE_RESERVATIONS.get(request.recipe);
+    await this.admissionSemaphore.acquire(reservation);
+    try {
+      await this.containerSemaphore.acquire(1);
+      try {
+        await this.runCompilerContainer(request, archivePath);
+      } finally {
+        this.containerSemaphore.release(1);
+      }
+    } finally {
+      this.admissionSemaphore.release(reservation);
+    }
+  }
+
+  runCompilerContainer(request, archivePath) {
+    const requestId = crypto.randomBytes(6).toString('hex');
+    const containerName = `pkgr-buildcurl-${this.sessionId}-${requestId}`;
+    const temporaryPath = `${archivePath}.tmp-${requestId}`;
+    const args = [
+      'run', '--rm',
+      '--platform', 'linux/amd64',
+      '--network', 'host',
+      '--add-host', 'buildcurl.com:127.0.0.1',
+      '--add-host', 'barebuild.com:127.0.0.1',
+      '--name', containerName,
+      '--label', `io.pkgr.buildcurl.session=${this.sessionId}`,
+      '-e', `BUILDCURL_URL=${this.url}`,
+      '-e', 'PKGR_BUILDCURL_NESTED=1',
+      '-e', `PKGR_BUILDCURL_TOKEN=${this.nestedToken}`,
+      '-e', `TARGET=${request.target}`,
+      '-e', `VERSION=${request.version}`,
+      '-e', `PREFIX=${request.prefix}`,
+      '--entrypoint', '/opt/pkgr/buildcurl/compile',
+      this.image,
+      request.recipe,
+      `--version=${request.version}`,
+      `--target=${request.target}`,
+      `--prefix=${request.prefix}`
+    ];
+
+    return new Promise((resolve, reject) => {
+      let output;
+      let child;
+      try {
+        output = fs.openSync(temporaryPath, 'wx');
+        child = this.spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (error) {
+        if (output !== undefined) fs.closeSync(output);
+        fs.rmSync(temporaryPath, { force: true });
+        reject(error);
+        return;
+      }
+      this.activeContainers.add(containerName);
+      let timedOut = false;
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        this.forceRemoveContainer(containerName);
+      }, this.timeoutMs);
+
+      child.stdout.on('data', (data) => {
+        try {
+          fs.writeSync(output, data);
+        } catch (error) {
+          child.kill('SIGTERM');
+          finish(error);
+        }
+      });
+      child.stderr.on('data', (data) => {
+        const message = data.toString().trimEnd();
+        if (message) this.core.info(message);
+      });
+
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.activeContainers.delete(containerName);
+        fs.closeSync(output);
+        const finalize = error
+          ? fs.promises.rm(temporaryPath, { force: true }).then(() => { throw error; })
+          : fs.promises.rename(temporaryPath, archivePath);
+        finalize.then(resolve, reject);
+      };
+
+      child.once('error', (error) => finish(error));
+      child.once('close', (code) => {
+        if (timedOut) finish(new Error(`Recipe ${request.recipe} timed out after ${Math.ceil(this.timeoutMs / 60000)} minutes`));
+        else if (code !== 0) finish(new Error(`Recipe ${request.recipe} failed with exit code ${code}`));
+        else finish();
+      });
+    });
+  }
+
+  forceRemoveContainer(containerName) {
+    const cleanup = this.spawn('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
+    cleanup.on('error', () => {});
+  }
+
+  async saveCaches() {
+    if (!this.cache) return;
+    for (const [key, artifactDir] of this.pendingSaves) {
+      try {
+        const cacheId = await this.cache.saveCache([artifactDir], key);
+        if (cacheId === -1) this.core.warning(`Toolchain cache was not saved: ${key}`);
+        else this.core.info(`Saved toolchain cache: ${key}`);
+      } catch (error) {
+        this.core.warning(`Unable to save toolchain cache ${key}: ${error.message}`);
+      }
+    }
+  }
+
+  async close() {
+    if (this.server) {
+      await new Promise((resolve) => this.server.close(resolve));
+      this.server = null;
+    }
+    for (const containerName of this.activeContainers) this.forceRemoveContainer(containerName);
+  }
+}
+
+module.exports = {
+  ALLOWED_RECIPES,
+  BuildcurlServer,
+  RequestError,
+  artifactDigest,
+  artifactIdentity,
+  cacheKey,
+  validateArchive,
+  validateRequest
+};
+
+
+/***/ }),
+
+/***/ 80677:
+/***/ ((module) => {
+
+function withInternalBuildcurlUrl(userEnvironment, buildcurlUrl) {
+  const values = (userEnvironment || '')
+    .split('\n')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  values.push(`BUILDCURL_URL=${buildcurlUrl}`);
+  return values.join('\n');
+}
+
+module.exports = { withInternalBuildcurlUrl };
+
+
+/***/ }),
+
+/***/ 46136:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const core = __nccwpck_require__(37484);
+const exec = __nccwpck_require__(95236);
+const cache = __nccwpck_require__(5116);
+const fs = __nccwpck_require__(79896);
+const path = __nccwpck_require__(16928);
+const { BuildcurlServer } = __nccwpck_require__(84580);
+const { withInternalBuildcurlUrl } = __nccwpck_require__(80677);
+
+async function capture(command, args, options = {}) {
+  let stdout = '';
+  await exec.exec(command, args, {
+    ...options,
+    silent: true,
+    listeners: {
+      ...(options.listeners || {}),
+      stdout: (data) => { stdout += data.toString(); }
+    }
+  });
+  return stdout.trim();
+}
+
+async function saveApplicationCache(appCachePath, cacheKey) {
+  if (!cacheKey || !fs.existsSync(appCachePath)) return;
+
+  core.info('Fixing application cache permissions');
+  try {
+    await exec.exec('sudo', ['chown', '-R', `${process.env.USER}:${process.env.USER}`, appCachePath]);
+  } catch (error) {
+    core.warning(`Failed to fix application cache permissions: ${error.message}`);
+  }
+
+  core.info(`Saving application cache with key: ${cacheKey}`);
+  try {
+    const cacheId = await cache.saveCache([appCachePath], cacheKey);
+    if (cacheId === -1) core.warning('Application cache was not saved');
+    else core.info(`Application cache saved: ${cacheId}`);
+  } catch (error) {
+    core.warning(`Unable to save application cache: ${error.message}`);
+  }
+}
+
+async function run() {
+  const workspace = '/tmp/pkgr';
+  const appCachePath = `${workspace}/cache/app`;
+  const toolchainCachePath = `${workspace}/cache/toolchains`;
+  let buildcurlServer;
+  let applicationCacheKey;
+  let packageSucceeded = false;
+
+  try {
+    let target = core.getInput('target', { required: true });
+    target = target.replace('-', '/').replace(':', '/');
+
+    const name = core.getInput('name', { required: true });
+    const appPath = core.getInput('path', { required: true });
+    const version = core.getInput('version', { required: true });
+    const pkgrVersion = core.getInput('pkgr_version', { required: true });
+    const cachePrefix = core.getInput('cache_prefix', { required: true });
+    const userEnvironment = core.getInput('env', { required: false }) || '';
+    const debug = core.getInput('debug', { required: false }) || 'false';
+
+    core.info(`Setting up workspace at ${workspace}`);
+    await exec.exec('rm', ['-rf', workspace]);
+    await exec.exec('mkdir', ['-p', appCachePath, toolchainCachePath, `${workspace}/output`]);
+    core.setOutput('workspace', workspace);
+
+    let iteration = Math.floor(Date.now() / 1000).toString();
+    try {
+      const gitHash = (await capture('git', ['rev-parse', 'HEAD'], { cwd: appPath })).substring(0, 7);
+      if (gitHash) iteration = `${iteration}.${gitHash}`;
+    } catch (error) {
+      core.debug('Could not get git hash');
+    }
+
+    const codename = target.replace('/', '').replace(/\..*/g, '');
+    iteration = `${iteration}.${codename}`;
+    core.info(`Iteration: ${iteration}`);
+
+    const dockerTag = [target.replace('/', ':'), pkgrVersion].join('-');
+    const dockerImage = `ghcr.io/pkgr/pkgr/${dockerTag}`;
+    core.info(`Pulling packaging image ${dockerImage}`);
+    await exec.exec('docker', ['pull', '--platform', 'linux/amd64', dockerImage]);
+
+    const imageMetadata = await capture('docker', [
+      'image', 'inspect',
+      '--format', '{{.Id}}|{{.Architecture}}',
+      dockerImage
+    ]);
+    const [imageId, architecture] = imageMetadata.split('|');
+    if (!imageId || architecture !== 'amd64') {
+      throw new Error(`Unsupported packaging image: expected linux/amd64, got ${imageMetadata}`);
+    }
+
+    const cacheRestorePrefix = `pkgr-${cachePrefix}-${codename}-${pkgrVersion}-`;
+    applicationCacheKey = `${cacheRestorePrefix}${process.env.GITHUB_SHA}`;
+    core.info(`Restoring application cache with key: ${applicationCacheKey}`);
+    const applicationCacheHit = await cache.restoreCache(
+      [appCachePath],
+      applicationCacheKey,
+      [cacheRestorePrefix]
+    );
+    core.info(applicationCacheHit ? `Application cache hit: ${applicationCacheHit}` : 'Application cache miss');
+
+    buildcurlServer = new BuildcurlServer({
+      image: imageId,
+      imageId,
+      architecture,
+      target: target.replace('/', ':'),
+      cachePrefix,
+      cacheRoot: toolchainCachePath,
+      cache,
+      core
+    });
+    core.saveState('BUILDCURL_SESSION', buildcurlServer.sessionId);
+    const buildcurlUrl = await buildcurlServer.start();
+    const buildEnvironment = withInternalBuildcurlUrl(userEnvironment, buildcurlUrl);
+
+    core.info(`Packaging ${name} version ${version} for ${target}`);
+    const dockerArgs = [
+      'run',
+      '--rm',
+      '--platform', 'linux/amd64',
+      '--network', 'host',
+      '--add-host', 'buildcurl.com:127.0.0.1',
+      '--add-host', 'barebuild.com:127.0.0.1',
+      '-v', `${path.resolve(appPath)}:/pkgr/app`,
+      '-v', `${appCachePath}:/pkgr/cache`,
+      '-v', `${workspace}/output:/pkgr/output`,
+      imageId,
+      '--name', name,
+      '--version', version,
+      '--iteration', iteration,
+      '--env', buildEnvironment,
+      `--debug=${debug}`
+    ];
+
+    await exec.exec('docker', dockerArgs);
+
+    const outputDir = `${workspace}/output`;
+    const packageName = fs.readdirSync(outputDir)
+      .find((file) => file.endsWith('.deb') || file.endsWith('.rpm'));
+    if (!packageName) throw new Error('No package file found in output directory');
+
+    const packagePath = path.join(outputDir, packageName);
+    const packageType = path.extname(packageName).substring(1);
+    core.info(`Package created: ${packageName} (${packageType})`);
+    core.setOutput('package_path', packagePath);
+    core.setOutput('package_type', packageType);
+    core.setOutput('package_name', packageName);
+    packageSucceeded = true;
+  } catch (error) {
+    core.setFailed(error.message);
+  } finally {
+    if (buildcurlServer) {
+      try {
+        await buildcurlServer.close();
+      } catch (error) {
+        core.warning(`Unable to stop the local buildcurl server: ${error.message}`);
+      }
+      try {
+        await buildcurlServer.saveCaches();
+      } catch (error) {
+        core.warning(`Unable to save toolchain caches: ${error.message}`);
+      }
+    }
+    if (packageSucceeded) await saveApplicationCache(appCachePath, applicationCacheKey);
+  }
+}
+
+run();
+
+module.exports = { capture, saveApplicationCache };
+
+
+/***/ }),
+
 /***/ 5116:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -2226,7 +2858,7 @@ function retry(name, method, getStatusCode, maxAttempts = constants_1.DefaultRet
 exports.retry = retry;
 function retryTypedResponse(name, method, maxAttempts = constants_1.DefaultRetryAttempts, delay = constants_1.DefaultRetryDelay) {
     return __awaiter(this, void 0, void 0, function* () {
-        return yield retry(name, method, (response) => response.statusCode, maxAttempts, delay, 
+        return yield retry(name, method, (response) => response.statusCode, maxAttempts, delay,
         // If the error object contains the statusCode property, extract it and return
         // an TypedResponse<T> so it can be processed by the retry logic.
         (error) => {
@@ -3750,8 +4382,8 @@ class OidcClient {
             const res = yield httpclient
                 .getJson(id_token_url)
                 .catch(error => {
-                throw new Error(`Failed to get ID Token. \n 
-        Error Code : ${error.statusCode}\n 
+                throw new Error(`Failed to get ID Token. \n
+        Error Code : ${error.statusCode}\n
         Error Message: ${error.message}`);
             });
             const id_token = (_a = res.result) === null || _a === void 0 ? void 0 : _a.value;
@@ -9609,7 +10241,7 @@ class BinaryWriter {
      * Write a `sint64` value, a signed, zig-zag-encoded 64-bit varint.
      */
     sint64(value) {
-        let long = pb_long_1.PbLong.from(value), 
+        let long = pb_long_1.PbLong.from(value),
         // zigzag encode
         sign = long.hi >> 31, lo = (long.lo << 1) ^ sign, hi = ((long.hi << 1) | (long.lo >>> 31)) ^ sign;
         goog_varint_1.varint64write(lo, hi, this.buf);
@@ -46721,7 +47353,7 @@ function createTokenCycler(credential, tokenCyclerOptions) {
             const tryGetAccessToken = () => credential.getToken(scopes, getTokenOptions);
             // Take advantage of promise chaining to insert an assignment to `token`
             // before the refresh can be considered done.
-            refreshWorker = beginRefresh(tryGetAccessToken, options.retryIntervalInMs, 
+            refreshWorker = beginRefresh(tryGetAccessToken, options.retryIntervalInMs,
             // If we don't have a token, then we should timeout immediately
             token?.expiresOnTimestamp ?? Date.now())
                 .then((_token) => {
@@ -48259,7 +48891,7 @@ const utils_common_js_1 = __nccwpck_require__(47764);
  */
 class BlobBatchClient {
     serviceOrContainerContext;
-    constructor(url, credentialOrPipeline, 
+    constructor(url, credentialOrPipeline,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -48291,7 +48923,7 @@ class BlobBatchClient {
     createBatch() {
         return new BlobBatch_js_1.BlobBatch();
     }
-    async deleteBlobs(urlsOrBlobClients, credentialOrOptions, 
+    async deleteBlobs(urlsOrBlobClients, credentialOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -48306,7 +48938,7 @@ class BlobBatchClient {
         }
         return this.submitBatch(batch);
     }
-    async setBlobsAccessTier(urlsOrBlobClients, credentialOrTier, tierOrOptions, 
+    async setBlobsAccessTier(urlsOrBlobClients, credentialOrTier, tierOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -49529,7 +50161,7 @@ class BlobServiceClient extends StorageClient_js_1.StorageClient {
      *                                  `BlobEndpoint=https://myaccount.blob.core.windows.net/;QueueEndpoint=https://myaccount.queue.core.windows.net/;FileEndpoint=https://myaccount.file.core.windows.net/;TableEndpoint=https://myaccount.table.core.windows.net/;SharedAccessSignature=sasString`
      * @param options - Optional. Options to configure the HTTP pipeline.
      */
-    static fromConnectionString(connectionString, 
+    static fromConnectionString(connectionString,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -49556,7 +50188,7 @@ class BlobServiceClient extends StorageClient_js_1.StorageClient {
             throw new Error("Connection string must be either an Account connection string or a SAS connection string");
         }
     }
-    constructor(url, credentialOrPipeline, 
+    constructor(url, credentialOrPipeline,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -50256,7 +50888,7 @@ class BlobClient extends StorageClient_js_1.StorageClient {
     get containerName() {
         return this._containerName;
     }
-    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, 
+    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -51356,7 +51988,7 @@ class AppendBlobClient extends BlobClient {
      * appendBlobsContext provided by protocol layer.
      */
     appendBlobContext;
-    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, 
+    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -51658,7 +52290,7 @@ class BlockBlobClient extends BlobClient {
      * blockBlobContext provided by protocol layer.
      */
     blockBlobContext;
-    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, 
+    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -52278,7 +52910,7 @@ class BlockBlobClient extends BlobClient {
                 if (options.onProgress) {
                     options.onProgress({ loadedBytes: transferProgress });
                 }
-            }, 
+            },
             // concurrency should set a smaller value than maxConcurrency, which is helpful to
             // reduce the possibility when a outgoing handler waits for stream data, in
             // this situation, outgoing handlers are blocked.
@@ -52301,7 +52933,7 @@ class PageBlobClient extends BlobClient {
      * pageBlobsContext provided by protocol layer.
      */
     pageBlobContext;
-    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, 
+    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -53093,7 +53725,7 @@ class ContainerClient extends StorageClient_js_1.StorageClient {
     get containerName() {
         return this._containerName;
     }
-    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, 
+    constructor(urlOrConnectionString, credentialOrPipelineOrContainerName,
     // Legacy, no fix for eslint error without breaking. Disable it for this interface.
     /* eslint-disable-next-line @azure/azure-sdk/ts-naming-options*/
     options) {
@@ -69584,7 +70216,7 @@ class BaseRequestPolicy {
     /**
      * The next policy in the pipeline. Each policy is responsible for executing the next one if the request is to continue through the pipeline.
      */
-    _nextPolicy, 
+    _nextPolicy,
     /**
      * The options that can be passed to a given request policy.
      */
@@ -75346,7 +75978,7 @@ class BaseRequestPolicy {
     /**
      * The next policy in the pipeline. Each policy is responsible for executing the next one if the request is to continue through the pipeline.
      */
-    _nextPolicy, 
+    _nextPolicy,
     /**
      * The options that can be passed to a given request policy.
      */
@@ -83062,7 +83694,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 /************************************************************************/
 /******/ 	// The module cache
 /******/ 	var __webpack_module_cache__ = {};
-/******/ 	
+/******/
 /******/ 	// The require function
 /******/ 	function __nccwpck_require__(moduleId) {
 /******/ 		// Check if module is in cache
@@ -83076,7 +83708,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 /******/ 			// no module.loaded needed
 /******/ 			exports: {}
 /******/ 		};
-/******/ 	
+/******/
 /******/ 		// Execute the module function
 /******/ 		var threw = true;
 /******/ 		try {
@@ -83085,162 +83717,23 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"4.
 /******/ 		} finally {
 /******/ 			if(threw) delete __webpack_module_cache__[moduleId];
 /******/ 		}
-/******/ 	
+/******/
 /******/ 		// Return the exports of the module
 /******/ 		return module.exports;
 /******/ 	}
-/******/ 	
+/******/
 /************************************************************************/
 /******/ 	/* webpack/runtime/compat */
-/******/ 	
+/******/
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
-/******/ 	
+/******/
 /************************************************************************/
-var __webpack_exports__ = {};
-const core = __nccwpck_require__(37484);
-const exec = __nccwpck_require__(95236);
-const cache = __nccwpck_require__(5116);
-const fs = __nccwpck_require__(79896);
-const path = __nccwpck_require__(16928);
-
-async function run() {
-  try {
-    // Get inputs
-    let target = core.getInput('target', { required: true });
-    // Normalize target: ubuntu-20, ubuntu:20, ubuntu/20 -> ubuntu/20
-    target = target.replace('-', '/').replace(':', '/');
-
-    const name = core.getInput('name', { required: true });
-    const appPath = core.getInput('path', { required: true });
-    const version = core.getInput('version', { required: true });
-    const pkgrVersion = core.getInput('pkgr_version', { required: true });
-    const cachePrefix = core.getInput('cache_prefix', { required: true });
-    const env = core.getInput('env', { required: false }) || '';
-    const debug = core.getInput('debug', { required: false }) || 'false';
-
-    // Setup workspace
-    const workspace = '/tmp/pkgr';
-
-    core.info(`Setting up workspace at ${workspace}`);
-    await exec.exec('rm', ['-rf', workspace]);
-    await exec.exec('mkdir', ['-p', `${workspace}/cache`, `${workspace}/output`]);
-
-    core.setOutput('workspace', workspace);
-
-    // Calculate iteration
-    let iteration = Math.floor(Date.now() / 1000).toString();
-
-    // Get git commit hash if available
-    let gitHash = '';
-    try {
-      await exec.exec('git', ['rev-parse', 'HEAD'], {
-        cwd: appPath,
-        silent: true,
-        listeners: {
-          stdout: (data) => {
-            gitHash = data.toString().trim().substring(0, 7);
-          }
-        }
-      });
-    } catch (error) {
-      core.debug('Could not get git hash');
-    }
-
-    if (gitHash) {
-      iteration = `${iteration}.${gitHash}`;
-    }
-
-    // Add codename to iteration
-    let codename = target.replace('/', '').replace(/\..*/g, '');
-    iteration = `${iteration}.${codename}`;
-
-    core.info(`Iteration: ${iteration}`);
-
-    // Restore cache
-    const cacheRestorePrefix = `pkgr-${cachePrefix}-${codename}-${pkgrVersion}-`
-    const cacheKey = `${cacheRestorePrefix}${process.env.GITHUB_SHA}`;
-    const restoreKeys = [cacheRestorePrefix];
-
-    core.info(`Restoring cache with key: ${cacheKey}`);
-    const cacheHit = await cache.restoreCache([`${workspace}/cache`], cacheKey, restoreKeys);
-    if (cacheHit) {
-      core.info(`Cache hit: ${cacheHit}`);
-    } else {
-      core.info(`Cache miss`);
-    }
-
-    // Package
-    core.info(`Packaging ${name} version ${version} for ${target}`);
-
-    const dockerTag = [target.replace('/', ':'), pkgrVersion].join('-');
-    const dockerImage = `ghcr.io/pkgr/pkgr/${dockerTag}`;
-    const dockerArgs = [
-      'run',
-      '--rm',
-      '-v', `${path.resolve(appPath)}:/pkgr/app`,
-      '-v', `${workspace}/cache:/pkgr/cache`,
-      '-v', `${workspace}/output:/pkgr/output`,
-      '--net=host',
-      dockerImage,
-      '--name', name,
-      '--version', version,
-      '--iteration', iteration,
-      '--env', env,
-      `--debug=${debug}`
-    ];
-
-    await exec.exec('docker', dockerArgs);
-
-    // Find package file
-    const outputDir = `${workspace}/output`;
-    const files = fs.readdirSync(outputDir);
-
-    let packagePath = '';
-    let packageType = '';
-    let packageName = '';
-
-    for (const file of files) {
-      if (file.endsWith('.deb') || file.endsWith('.rpm')) {
-        packagePath = path.join(outputDir, file);
-        packageType = path.extname(file).substring(1);
-        packageName = file;
-        break;
-      }
-    }
-
-    if (!packagePath) {
-      throw new Error('No package file found in output directory');
-    }
-
-    core.info(`Package created: ${packageName} (${packageType})`);
-    core.setOutput('package_path', packagePath);
-    core.setOutput('package_type', packageType);
-    core.setOutput('package_name', packageName);
-
-    // Fix cache permissions before saving
-    core.info('Fixing cache permissions');
-    try {
-      await exec.exec('sudo', ['chown', '-R', `${process.env.USER}:${process.env.USER}`, `${workspace}/cache`]);
-    } catch (error) {
-      core.warning(`Failed to fix permissions: ${error.message}`);
-    }
-
-    // Save cache
-    core.info(`Saving cache with key: ${cacheKey}`);
-    const cacheId = await cache.saveCache([`${workspace}/cache`], cacheKey);
-    if (cacheId) {
-      core.info(`Cache saved: ${cacheId}`);
-    } else {
-      core.info(`Cache save failed`);
-    }
-
-  } catch (error) {
-    core.setFailed(error.message);
-  }
-}
-
-run();
-
-module.exports = __webpack_exports__;
+/******/
+/******/ 	// startup
+/******/ 	// Load entry module and return exports
+/******/ 	// This entry module is referenced by other modules so it can't be inlined
+/******/ 	var __webpack_exports__ = __nccwpck_require__(46136);
+/******/ 	module.exports = __webpack_exports__;
+/******/
 /******/ })()
 ;

@@ -46,3 +46,5 @@ outputs:
 runs:
   using: 'node24'
   main: 'dist/index.js'
+  post: 'dist/cleanup/index.js'
+  post-if: 'always()'
