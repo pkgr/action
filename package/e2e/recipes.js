@@ -77,7 +77,7 @@ async function assertGemBinary(image, rubyArchive, gemArchive, binary, expectedO
       { path: rubyArchive, prefix: '/app/vendor/ruby' },
       { path: gemArchive, prefix: '/usr/local' }
     ],
-    `env PATH=/usr/local/bin:/app/vendor/ruby/bin:$PATH GEM_HOME=/usr/local GEM_PATH=/usr/local /usr/local/bin/${binary} --version`
+    `env PATH=/usr/local/bin:/app/vendor/ruby/bin:$PATH GEM_HOME=/usr/local /usr/local/bin/${binary} --version`
   );
   assert.match(`${stdout}${stderr}`, expectedOutput);
 }
