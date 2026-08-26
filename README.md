@@ -2,6 +2,10 @@
 
 GitHub Action for packaging apps as DEB or RPM. Should be used as a replacement for [Packager.io](https://packager.io) hosted service.
 
+The package action builds missing Ruby, Node, and Python toolchains locally. It caches each toolchain independently from the application build cache. No hosted `buildcurl.com` or `barebuild.com` compiler is required.
+
+Local toolchain builds require a Linux AMD64 Docker runner with host networking. GitHub-hosted Ubuntu runners and conventional Linux Docker hosts are supported. Docker Desktop and restricted or rootless Docker daemons are not supported.
+
 ## Usage
 
 ### Building Packages

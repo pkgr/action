@@ -1,50 +1,82 @@
 name: Test
+
 on:
+  pull_request:
   push:
   workflow_dispatch:
 
 env:
-  REPOSITORY: crohr/blank-noop-app
-jobs:
-  test:
-    timeout-minutes: 30
-    name: ${{ matrix.target }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - debian:13
-          - ubuntu:24.04
-          - el:9
-          - sles:15
+  PKGR_VERSION: a7873a97937aeca96473f27db8192585475fab03
 
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
         with:
-          path: action
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package/package-lock.json
+      - run: npm ci
+        working-directory: package
+      - run: npm test
+        working-directory: package
+      - run: npm run build
+        working-directory: package
+      - name: Verify generated action bundle
+        run: git diff --exit-code -- package/dist
+
+  recipes:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
       - uses: actions/checkout@v5
-        with:
-          repository: ${{ env.REPOSITORY }}
-          ref: master
-          path: app
-      - uses: ./action/package
+      - name: Resolve the pkgr revision
+        id: pkgr
+        run: |
+          revision="$PKGR_VERSION"
+          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            revision=$(git ls-remote https://github.com/crohr/pkgr.git refs/heads/master | cut -f1)
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Exercise local recipes and warm cache hits
+        run: node package/e2e/recipes.js
+        env:
+          TARGET: ubuntu:24.04
+          PKGR_REVISION: ${{ steps.pkgr.outputs.revision }}
+
+  applications:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ruby, node, python]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./package
         id: package
         with:
-          target: ${{ matrix.target }}
-          name: blank-noop-app
+          target: ubuntu:24.04
+          name: pkgr-e2e-${{ matrix.language }}
           version: '1.0.0'
-          path: app
+          path: package/e2e/fixtures/${{ matrix.language }}
+          pkgr_version: ${{ env.PKGR_VERSION }}
+          cache_prefix: e2e-${{ matrix.language }}
           debug: true
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package.outputs.package_name }}
-          path: ${{ steps.package.outputs.package_path }}
-      - name: Publish
-        uses: ./action/publish
-        with:
-          target: ${{ matrix.target }}
-          token: ${{ secrets.PACKAGER_PUBLISH_TOKEN }}
-          repository: ${{ env.REPOSITORY }}
-          channel: ${{ github.ref_name }}
-          file: ${{ steps.package.outputs.package_path }}
+      - name: Assert and install the native package
+        run: |
+          test -f '${{ steps.package.outputs.package_path }}'
+          case '${{ matrix.language }}' in
+            ruby) expected='ruby 3.3.10' ;;
+            node) expected='node 24.13.0' ;;
+            python) expected='python 3.10.8' ;;
+          esac
+          package/e2e/install-package.sh \
+            ubuntu:24.04 \
+            'barebuild/ubuntu:24.04' \
+            '${{ steps.package.outputs.package_path }}' \
+            "pkgr-e2e-${{ matrix.language }} | grep -F '$expected'"

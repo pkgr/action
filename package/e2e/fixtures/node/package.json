@@ -1,0 +1,7 @@
+{
+  "name": "pkgr-e2e-node",
+  "version": "1.0.0",
+  "engines": {
+    "node": "24.13.0"
+  }
+}
