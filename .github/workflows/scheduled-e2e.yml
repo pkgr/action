@@ -4,12 +4,35 @@ on:
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
-
-env:
-  PKGR_VERSION: c87a5d00a3a7c4c0887161c8000cc7df8734ebed
+    inputs:
+      pkgr_version:
+        description: master or a full pkgr commit SHA
+        required: false
+        default: master
 
 jobs:
+  resolve-pkgr:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Resolve the pkgr version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.pkgr_version || 'master' }}
+        run: |
+          version="$REQUESTED_VERSION"
+          if [[ "$version" = master ]]; then
+            version=$(git ls-remote https://github.com/pkgr/pkgr.git refs/heads/master | cut -f1)
+          fi
+          if [[ ! "$version" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "pkgr_version must be master or a full commit SHA" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
   recipes:
+    needs: resolve-pkgr
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
@@ -29,23 +52,18 @@ jobs:
           - sles:12
           - sles:15
           - sles:16
+    env:
+      PKGR_VERSION: ${{ needs.resolve-pkgr.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - name: Resolve the pkgr revision
-        id: pkgr
-        run: |
-          revision="$PKGR_VERSION"
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            revision=$(git ls-remote https://github.com/crohr/pkgr.git refs/heads/master | cut -f1)
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Exercise local recipes and warm cache hits
         run: node package/e2e/recipes.js
         env:
           TARGET: ${{ matrix.target }}
-          PKGR_REVISION: ${{ steps.pkgr.outputs.revision }}
+          PKGR_REVISION: ${{ needs.resolve-pkgr.outputs.version }}
 
   applications:
+    needs: resolve-pkgr
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -66,6 +84,8 @@ jobs:
           - sles:15
           - sles:16
         language: [ruby, node, python]
+    env:
+      PKGR_VERSION: ${{ needs.resolve-pkgr.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - name: Select legacy runtime versions
