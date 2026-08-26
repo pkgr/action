@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  PKGR_VERSION: 26aee14e22b823bd3ae52dd385be570e591900d1
+  PKGR_VERSION: 0688f8a21880e43aecd670d310ec2a2c50307466
 
 jobs:
   recipes:
