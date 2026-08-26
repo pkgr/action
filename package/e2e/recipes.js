@@ -9,10 +9,15 @@ const { promisify } = require('node:util');
 const { BuildcurlServer } = require('../buildcurl-server');
 
 const execFileAsync = promisify(execFile);
+let archiveSequence = 0;
 
 async function requestArchive(server, cacheRoot, request, expectedStatus) {
   const query = new URLSearchParams(request);
-  const archivePath = path.join(cacheRoot, `${request.recipe}-${request.version}-${expectedStatus}.tgz`);
+  archiveSequence += 1;
+  const archivePath = path.join(
+    cacheRoot,
+    `${archiveSequence}-${request.recipe}-${request.version}-${expectedStatus}.tgz`
+  );
   const result = await new Promise((resolve, reject) => {
     const clientRequest = http.get(`${server.url}?${query}`, async (response) => {
       try {
